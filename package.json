@@ -1,8 +1,14 @@
 {
-  "name": "js-mobi",
+  "name": "mobi-js",
   "version": "1.0.0",
-  "description": "JavaScript Mobi Reader",
+  "description": "Mobi reader in JavaScript",
   "main": "index.js",
   "author": "Hanai",
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "prettier": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^2.2.1"
+  }
 }
