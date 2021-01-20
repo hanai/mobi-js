@@ -1,6 +1,6 @@
-import { Sectionizer } from './sectionizer.mjs'
-import { getUint16, getUint32, decode } from './utils.mjs'
-import * as struct from './struct.mjs'
+import { Sectionizer } from './sectionizer.mjs';
+import { getUint16, getUint32, decode, getLanguage } from './utils.mjs';
+import * as struct from './struct.mjs';
 
 export class MobiHeader {
   static id_map_strings = {
@@ -80,7 +80,7 @@ export class MobiHeader {
     542: 'Container_Id',
     543: 'Asset-Type', // FONT_CONTAINER, BW_CONTAINER, HD_CONTAINER
     544: 'Unknown_544',
-  }
+  };
 
   static id_map_values = {
     115: 'sample',
@@ -100,7 +100,7 @@ export class MobiHeader {
     402: 'Publisher-Limit',
     404: 'Text-to-Speech-Disabled',
     406: 'Rental-Expiration-Time',
-  }
+  };
 
   static id_map_hexstrings = {
     208: 'Watermark_(hex)',
@@ -114,56 +114,94 @@ export class MobiHeader {
     451: 'Full-Story-Length_(hex)',
     452: 'Sample-Start_Location_(hex)',
     453: 'Sample-End-Location_(hex)',
-  }
-
-  metadata = {}
+  };
 
   /**
    * @param {Sectionizer} sect
    * @param {number} sectNumber
    */
   constructor(sect, sectNumber) {
-    this.sect = sect
-    this.start = sectNumber
-    const header = (this.header = this.sect.loadSection(this.start))
+    this.sect = sect;
+    this.start = sectNumber;
+    const header = (this.header = this.sect.loadSection(this.start));
 
-    console.log(new TextDecoder('utf-8').decode(header.subarray(16, 20)))
+    if (header.length > 20 && decode(header.subarray(16, 20)) == 'MOBI') {
+      this.palm = false;
+    } else if (this.sect.ident == 'TEXtREAd') {
+      this.palm = true;
+    } else {
+      throw 'Unknown File Format';
+    }
 
-    const records = getUint16(header, 0x8)
-    console.log(`records: ${records}`)
+    this.records = struct.unpack('>H', header, 0x8)[0];
 
-    const compression = getUint16(header)
-    console.log(`compression: ${compression}`)
-    const length = getUint32(header.subarray(20), 0)
-    const type = getUint32(header.subarray(20), 4 * 1)
-    const codepage = getUint32(header.subarray(20), 4 * 2)
-    const unique_id = getUint32(header.subarray(20), 4 * 3)
-    const version = getUint32(header.subarray(20), 4 * 4)
-    console.log(length, type, codepage, unique_id, version)
+    this.title = decode(this.sect.palmname, 'windows-1252');
+    this.length = header.length - 16;
+    this.type = 3;
+    this.exth_offset = this.length + 16;
+    this.metadata = {};
+
+    // set up for decompression/unpacking
+    this.compression = struct.unpack('>H', header, 0x0)[0];
+    if (this.compression === 0x4448) {
+      console.log('compression: HuffcdicReader');
+    } else if (this.compression === 2) {
+      console.log('compression: PalmdocReader');
+    } else if (this.compression === 1) {
+      console.log('compression: UncompressedReader');
+    } else {
+      throw `invalid compression type: 0x${this.compression.toString(16)}"`;
+    }
+
+    if (this.palm) return;
+
+    [
+      this.length,
+      this.type,
+      this.codepage,
+      this.unique_id,
+      this.version,
+    ] = struct.unpack('>LLLLL', header.subarray(20, 40));
 
     const codec_map = {
       1252: 'windows-1252',
       65001: 'utf-8',
-    }
+    };
 
-    this.codec = codepage in codec_map ? codec_map[codepage] : codec_map[1252]
+    this.codec =
+      this.codepage in codec_map ? codec_map[this.codepage] : codec_map[1252];
 
-    const toff = getUint32(header, 0x54)
-    const tlen = getUint32(header, 0x54 + 4)
-    const t = decode('utf-8', header.subarray(toff, toff + tlen))
-    console.log(`title: ${t}`)
-    const exth_flag = getUint32(header.subarray(0x80, 0x84))
-    this.hasExth = exth_flag & 0x40
-    let exth_offset = length + 16
+    const [toff, tlen] = struct.unpack('>II', header.subarray(0x54, 0x5c));
+    console.log(toff, tlen);
+    this.title = decode(header.subarray(toff, toff + tlen), this.codec);
+    const exth_flag = struct.unpack('>L', header.subarray(0x80, 0x84))[0];
+    this.hasExth = exth_flag & 0x40;
+    this.exth_offset = this.length + 16;
+    this.exth_length = 0;
     if (this.hasExth) {
-      let exth_length = getUint32(header, exth_offset + 4)
-      exth_length = ((exth_length + 3) >> 2) << 2 // round to next 4 byte boundary
-      console.log(`exth_length: ${exth_length}`)
-      this.exth = header.subarray(exth_offset, exth_offset + exth_length)
+      this.exth_length = struct.unpack(
+        '>L',
+        this.header,
+        this.exth_offset + 4
+      )[0];
+      this.exth_length = ((this.exth_length + 3) >> 2) << 2; // round to next 4 byte boundary
+      this.exth = header.subarray(
+        this.exth_offset,
+        this.exth_offset + this.exth_length
+      );
     }
 
     // parse the exth / metadata
-    this.parseMetaData()
+    this.parseMetaData();
+
+    this.crypto_type = struct.unpack('>H', this.header, 0xc)[0];
+  }
+
+  Language() {
+    const langcode = struct.unpack('!L', this.header.subarray(0x5c, 0x60))[0];
+    const langid = langcode & 0xff;
+    const sublangid = (langcode >> 8) & 0xff;
+    return getLanguage(langid, sublangid);
   }
 
   // all metadata is stored in a dictionary with key and returns a *list* of values
@@ -171,51 +209,48 @@ export class MobiHeader {
   parseMetaData() {
     const addValue = (name, value) => {
       if (this.metadata[name] == null) {
-        this.metadata[name] = value
+        this.metadata[name] = [value];
       } else {
-        if (!Array.isArray(this.metadata[name])) {
-          this.metadata[name] = [this.metadata[name]]
-        }
-        this.metadata[name].push(value)
+        this.metadata[name].push(value);
       }
-    }
+    };
 
     if (this.hasExth) {
-      let extheader = this.exth
+      let extheader = this.exth;
       const [_length, num_items] = struct.unpack(
         '>LL',
         extheader.subarray(4, 12)
-      )
-      extheader = extheader.subarray(12)
+      );
+      console.log(num_items);
+      extheader = extheader.subarray(12);
 
-      let pos = 0
+      let pos = 0;
       for (let i = 0; i < num_items; i++) {
         const [id, size] = struct.unpack(
           '>LL',
           extheader.subarray(pos, pos + 8)
-        )
-        const content = extheader.subarray(pos + 8, pos + size)
+        );
+        const content = extheader.subarray(pos + 8, pos + size);
 
         if (id in MobiHeader.id_map_strings) {
-          const name = MobiHeader.id_map_strings[id]
-          addValue(name, decode(this.codec, content))
+          const name = MobiHeader.id_map_strings[id];
+          addValue(name, decode(content, this.codec));
         } else if (id in MobiHeader.id_map_values) {
-          const name = MobiHeader.id_map_values[id]
+          const name = MobiHeader.id_map_values[id];
           if (size == 9) {
-            const [value] = struct.unpack('B', content)
-            console.log(`${name}${value}`)
-            // addValue(name, decode("utf-8", value));
+            const [value] = struct.unpack('B', content);
+            addValue(name, value);
           } else if (size == 10) {
-            const [value] = struct.unpack('>H', content)
-            addValue(name, value)
+            const [value] = struct.unpack('>H', content);
+            addValue(name, value);
           } else if (size == 12) {
-            const [value] = struct.unpack('>L', content)
+            const [value] = struct.unpack('>L', content);
             if (id == 201 || id == 202) {
               if (value != 0xffffffff) {
-                addValue(name, value)
+                addValue(name, value);
               }
             } else {
-              addValue(name, value)
+              addValue(name, value);
             }
           } else {
             console(
@@ -223,13 +258,17 @@ export class MobiHeader {
               id,
               size,
               content
-            )
-            addValue(name, content)
+            );
+            addValue(name, content);
           }
         }
-        pos += size
+        pos += size;
       }
     }
-    console.log(this.metadata)
+    this.metadata['Language'] = [this.Language()];
+    this.metadata['Title'] = [this.title];
+    this.metadata['Codec'] = [this.codec];
+    this.metadata['UniqueID'] = [this.unique_id];
+    console.log(this.metadata);
   }
 }
