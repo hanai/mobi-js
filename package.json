@@ -1,0 +1,8 @@
+{
+  "name": "js-mobi",
+  "version": "1.0.0",
+  "description": "JavaScript Mobi Reader",
+  "main": "index.js",
+  "author": "Hanai",
+  "license": "MIT"
+}
