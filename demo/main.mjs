@@ -1,6 +1,4 @@
-import { Sectionizer } from './mobi/sectionizer.mjs';
-import { MobiHeader } from './mobi/header.mjs';
-import { decode } from './mobi/utils.mjs';
+import { unpackBook } from './mobi/unpack.mjs';
 
 const input = document.getElementById('file-input');
 
@@ -26,16 +24,7 @@ input.addEventListener('change', (e) => {
     const file = files[0];
     readFileAsArrayBuffer(file).then((buffer) => {
       const bytes = new Uint8Array(buffer);
-      const sect = new Sectionizer(bytes);
-
-      if (
-        decode(sect.ident) != 'BOOKMOBI' &&
-        decode(sect.ident) != 'TEXtREAd'
-      ) {
-        throw 'Invalid file format';
-      }
-
-      const mh = new MobiHeader(sect, 0);
+      unpackBook(bytes);
     });
   }
 });

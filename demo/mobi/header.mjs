@@ -1,4 +1,5 @@
 import { Sectionizer } from './sectionizer.mjs';
+import { PalmdocReader } from './uncompress.mjs';
 import { getUint16, getUint32, decode, getLanguage } from './utils.mjs';
 import * as struct from './struct.mjs';
 
@@ -121,6 +122,10 @@ export class MobiHeader {
    * @param {number} sectNumber
    */
   constructor(sect, sectNumber) {
+    /**
+     * @type {Sectionizer}
+     * @public
+     */
     this.sect = sect;
     this.start = sectNumber;
     const header = (this.header = this.sect.loadSection(this.start));
@@ -138,19 +143,26 @@ export class MobiHeader {
     this.title = decode(this.sect.palmname, 'windows-1252');
     this.length = header.length - 16;
     this.type = 3;
+    this.codepage = 1252;
+    /**
+     * @type {number}
+     */
+    this.version = 0;
     this.exth_offset = this.length + 16;
+    this.mlstart = this.sect.loadSection(this.start + 1).slice(0, 4);
+    this.rawSize = 0;
     this.metadata = {};
 
     // set up for decompression/unpacking
     this.compression = struct.unpack('>H', header, 0x0)[0];
     if (this.compression === 0x4448) {
-      console.log('compression: HuffcdicReader');
     } else if (this.compression === 2) {
-      console.log('compression: PalmdocReader');
+      this.unpack = new PalmdocReader().unpack;
     } else if (this.compression === 1) {
-      console.log('compression: UncompressedReader');
     } else {
-      throw `invalid compression type: 0x${this.compression.toString(16)}"`;
+      throw new Error(
+        `invalid compression type: 0x${this.compression.toString(16)}"`
+      );
     }
 
     if (this.palm) return;
@@ -172,7 +184,6 @@ export class MobiHeader {
       this.codepage in codec_map ? codec_map[this.codepage] : codec_map[1252];
 
     const [toff, tlen] = struct.unpack('>II', header.subarray(0x54, 0x5c));
-    console.log(toff, tlen);
     this.title = decode(header.subarray(toff, toff + tlen), this.codec);
     const exth_flag = struct.unpack('>L', header.subarray(0x80, 0x84))[0];
     this.hasExth = exth_flag & 0x40;
@@ -195,6 +206,123 @@ export class MobiHeader {
     this.parseMetaData();
 
     this.crypto_type = struct.unpack('>H', this.header, 0xc)[0];
+
+    // Start sector for additional files such as images, fonts, resources, etc
+    // Can be missing so fall back to default set previously
+    let ofst = struct.unpack('>L', this.header, 0x6c)[0];
+    if (ofst != 0xfff) {
+      this.firstresource = ofst + this.start;
+    }
+    ofst = struct.unpack('>L', this.header, 0x50)[0];
+    if (ofst != 0xfff) {
+      this.firstcontext = ofst + this.start;
+    }
+
+    if (this.isPrintReplica()) {
+      return;
+    }
+
+    if (this.version < 8) {
+      // Dictionary metaOrthIndex
+      this.metaOrthIndex = struct.unpack('>L', this.header, 0x28)[0];
+      if (this.metaOrthIndex != 0xfff) {
+        this.metaOrthIndex += this.start;
+      }
+
+      // Dictionary metaOrthIndex
+      this.metaInflIndex = struct.unpack('>L', this.header, 0x2c)[0];
+      if (this.metaInflIndex != 0xfff) {
+        this.metaInflIndex += this.start;
+      }
+    }
+
+    // handle older headers without any ncxindex info and later
+    // specifically 0xe4 headers
+    if (this.length + 16 < 0xf8) {
+      return;
+    }
+
+    // NCX Index
+    this.ncxidx = struct.unpack('>L', this.header.slice(0xf4, 0xf8))[0];
+    if (this.ncxidx != 0xfff) {
+      this.ncxidx += this.start;
+    }
+
+    // K8 specific Indexes
+    if (this.start != 0 || this.version == 8) {
+      // Index into <xml> file skeletons in RawML
+      this.skelidx = struct.unpack('>L', this.header, 0xfc)[0];
+      if (this.skelidx != 0xfff) {
+        this.skelidx += this.start;
+      }
+
+      // Index into <div> sections in RawML
+      this.fragidx = struct.unpack('>L', this.header, 0xf8)[0];
+      if (this.fragidx != 0xfff) {
+        this.fragidx += this.start;
+      }
+
+      // Index into Other files
+      this.guideidx = struct.unpack('>L', this.header, 0x104)[0];
+      if (this.guideidx != 0xfff) {
+        this.guideidx += this.start;
+      }
+
+      // dictionaries do not seem to use the same approach in K8's
+      // so disable them
+      this.metaOrthIndex = 0xffffffff;
+      this.metaInflIndex = 0xffffffff;
+
+      // need to use the FDST record to find out how to properly unpack
+      // the rawML into pieces
+      // it is simply a table of start and end locations for each flow piece
+      this.fdst = struct.unpack('>L', this.header, 0xc0)[0];
+      this.fdstcnt = struct.unpack('>L', this.header, 0xc4)[0];
+      // if cnt is 1 or less, fdst section mumber can be garbage
+      if (this.fdstcnt <= 1) {
+        this.fdst = 0xfff;
+      }
+      if (this.fdst != 0xfff) {
+        this.fdst += this.start;
+        // setting of fdst section description properly handled in mobi_kf8proc
+      }
+    }
+  }
+
+  dumpheader() {}
+
+  /**
+   * @returns {boolean}
+   */
+  isPrintReplica() {
+    // https://wiki.mobileread.com/wiki/AZW4
+    return decode(this.mlstart.slice(0, 4)) === '%MOP';
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isK8() {
+    return this.start != 0 || this.version === 8;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isEncrypted() {
+    return this.crypto_type != 0;
+  }
+
+  hasNCX() {
+    return this.ncxidx != 0xff;
+  }
+
+  isDictionary() {
+    return this.metaOrthIndex != 0xff;
+  }
+
+  decompress(data) {
+    return this.unpack(data);
   }
 
   Language() {
@@ -202,6 +330,55 @@ export class MobiHeader {
     const langid = langcode & 0xff;
     const sublangid = (langcode >> 8) & 0xff;
     return getLanguage(langid, sublangid);
+  }
+
+  getRawML() {
+    const getSizeOfTrailingDataEntry = (data) => {
+      let num = 0;
+      for (let v of data.slice(data.length - 4)) {
+        console.log(v);
+      }
+    };
+
+    const trimTrailingDataEntries = (data) => {
+      console.log(trailers);
+      for (let i = 0; i < trailers; i++) {
+        num = getSizeOfTrailingDataEntry(data);
+        data = data.slice(0, data.length - num);
+      }
+      if (multibyte) {
+        num = data[data.length - 1] & (3 + 1);
+        data = data.slice(0, data.length - num);
+      }
+      return data;
+    };
+
+    let multibyte = 0;
+    let trailers = 0;
+    console.log(this.sect.ident);
+    if (this.sect.ident == 'BOOKMOBI') {
+      const mobi_length = struct.unpack('>L', this.header, 0x14)[0];
+      const mobi_version = struct.unpack('>L', this.header, 0x68)[0];
+      if (mobi_length >= 0xe4 && mobi_version >= 5) {
+        const flags = struct.unpack('>H', this.header, 0xf2)[0];
+        multibyte = flags & 1;
+        while (flags > 1) {
+          if (flags & 2) {
+            trailers++;
+          }
+          flags = flags >> 1;
+        }
+      }
+    }
+    // get raw mobi markup languge
+    console.log('Unpacking raw markup language');
+    const dataList = [];
+    for (let i = 1; i < this.records + 1; i++) {
+      const data = trimTrailingDataEntries(
+        this.sect.loadSection(this.start + i)
+      );
+      dataList.push(this.unpack(data));
+    }
   }
 
   // all metadata is stored in a dictionary with key and returns a *list* of values
@@ -221,7 +398,6 @@ export class MobiHeader {
         '>LL',
         extheader.subarray(4, 12)
       );
-      console.log(num_items);
       extheader = extheader.subarray(12);
 
       let pos = 0;
@@ -269,6 +445,31 @@ export class MobiHeader {
     this.metadata['Title'] = [this.title];
     this.metadata['Codec'] = [this.codec];
     this.metadata['UniqueID'] = [this.unique_id];
-    console.log(this.metadata);
+  }
+
+  /**
+   * @returns {object}
+   */
+  getMetaData() {
+    return this.metadata;
+  }
+
+  describeHeader(DUMP) {
+    console.log(`Mobi Version: ${this.version}`);
+    console.log(`Codec: ${this.codec}`);
+    console.log(`Title: ${this.title}`);
+    if ('Updated_Title' in this.metadata) {
+      console.log(`EXTH Title: ${this.metadata['Updated_Title'][0]}`);
+    }
+    if (this.compression === 0x4448) {
+      console.log('Huffdic compression');
+    } else if (this.compression === 2) {
+      console.log('Palmdoc compression');
+    } else if (this.compression === 1) {
+      console.log('No compression');
+    }
+    if (DUMP) {
+      this.dumpheader();
+    }
   }
 }

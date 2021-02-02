@@ -1,13 +1,27 @@
+/**
+ * @module sectionizer
+ */
 import { getUint16, getUint32, decode } from './utils.mjs';
 import * as struct from './struct.mjs';
 
+/**
+ * @class
+ */
 export class Sectionizer {
   /**
    * @param {Uint8Array} data
    */
   constructor(data) {
     this.data = data;
+    /**
+     * @type {Uint8Array}
+     * @public
+     */
     this.palmheader = data.subarray(0, 78);
+    /**
+     * @type {Uint8Array}
+     * @public
+     */
     this.palmname = data.subarray(0, 32);
     this.ident = this.palmheader.subarray(0x3c, 0x3c + 8);
     this.num_sections = struct.unpack('>H', this.palmheader, 76)[0];
